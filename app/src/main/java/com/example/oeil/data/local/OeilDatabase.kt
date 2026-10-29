@@ -8,11 +8,11 @@ import android.database.sqlite.SQLiteOpenHelper
 import com.example.oeil.model.ChatMessage
 import com.example.oeil.model.ChatThread
 import com.example.oeil.model.User
+import java.util.UUID
 
 /**
- * Small SQLite store for accounts, the active session, conversations and local
- * settings. Kept dependency-free (plain [SQLiteOpenHelper]) so the app does not
- * need an ORM while the data model is still moving.
+ * Small SQLite store for the local profile, conversations and settings.
+ * Kept dependency-free (plain [SQLiteOpenHelper]) while the data model is moving.
  */
 class OeilDatabase(context: Context) : SQLiteOpenHelper(
     context.applicationContext,
@@ -93,7 +93,7 @@ class OeilDatabase(context: Context) : SQLiteOpenHelper(
     fun activeUser(): User? =
         readableDatabase.rawQuery(
             """
-            SELECT u.id, u.email, u.name, u.token
+            SELECT u.id, u.name
             FROM users u
             INNER JOIN session s ON s.user_id = u.id
             WHERE s.id = 1
@@ -101,18 +101,23 @@ class OeilDatabase(context: Context) : SQLiteOpenHelper(
             null
         ).use { cursor -> if (cursor.moveToFirst()) cursor.toUser() else null }
 
-    fun findUserByEmail(email: String): User? =
-        readableDatabase.rawQuery(
-            "SELECT id, email, name, token FROM users WHERE email = ?",
-            arrayOf(email)
-        ).use { cursor -> if (cursor.moveToFirst()) cursor.toUser() else null }
+    fun localUser(): User {
+        writableDatabase.execSQL("UPDATE users SET token = NULL")
+        val existing = activeUser()
+        val id = existing?.id ?: getSetting(LOCAL_USER_ID_KEY)
+            ?: UUID.randomUUID().toString().also { setSetting(LOCAL_USER_ID_KEY, it) }
+        val user = User(id = id, name = "On this device")
+        saveUser(user)
+        setActiveUser(user.id)
+        return user
+    }
 
     fun saveUser(user: User) {
         val values = ContentValues().apply {
             put("id", user.id)
-            put("email", user.email)
+            put("email", LOCAL_USER_EMAIL)
             put("name", user.name)
-            put("token", user.token)
+            putNull("token")
             put("created_at", System.currentTimeMillis())
         }
         writableDatabase.insertWithOnConflict(
@@ -268,17 +273,16 @@ class OeilDatabase(context: Context) : SQLiteOpenHelper(
     }
 
     private fun Cursor.toUser(): User {
-        val tokenIndex = getColumnIndexOrThrow("token")
         return User(
             id = getString(getColumnIndexOrThrow("id")),
-            email = getString(getColumnIndexOrThrow("email")),
-            name = getString(getColumnIndexOrThrow("name")),
-            token = if (isNull(tokenIndex)) null else getString(tokenIndex)
+            name = getString(getColumnIndexOrThrow("name"))
         )
     }
 
     private companion object {
         const val DATABASE_NAME = "oeil.db"
         const val DATABASE_VERSION = 1
+        const val LOCAL_USER_ID_KEY = "local_user_id"
+        const val LOCAL_USER_EMAIL = "on-device@oeil.local"
     }
 }

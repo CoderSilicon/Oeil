@@ -26,11 +26,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Logout
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -76,8 +76,8 @@ fun AppDrawer(
     activeThreadId: String?,
     onNewChat: () -> Unit,
     onOpenThread: (String) -> Unit,
+    onOpenSettings: () -> Unit,
     onClearAll: () -> Unit,
-    onLogout: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -128,6 +128,15 @@ fun AppDrawer(
             highlighted = true,
             onClick = {
                 onNewChat()
+                onClose()
+            }
+        )
+
+        DrawerRow(
+            icon = Icons.Outlined.Settings,
+            label = "Settings",
+            onClick = {
+                onOpenSettings()
                 onClose()
             }
         )
@@ -183,7 +192,7 @@ fun AppDrawer(
         }
 
         SectionDivider()
-        DrawerFooter(user = user, conversationCount = threads.size, onLogout = onLogout)
+        DrawerFooter(user = user, conversationCount = threads.size)
     }
 }
 
@@ -406,8 +415,7 @@ private fun SectionDivider() {
 @Composable
 private fun DrawerFooter(
     user: User,
-    conversationCount: Int,
-    onLogout: () -> Unit
+    conversationCount: Int
 ) {
     Row(
         modifier = Modifier
@@ -454,11 +462,6 @@ private fun DrawerFooter(
             )
         }
 
-        HeaderIcon(
-            icon = Icons.AutoMirrored.Outlined.Logout,
-            contentDescription = "Sign out",
-            onClick = onLogout
-        )
     }
 }
 

@@ -1,33 +1,7 @@
-import java.util.Properties
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
-
-val localProperties = Properties().apply {
-    val file = rootProject.file("local.properties")
-    if (file.exists()) {
-        file.inputStream().use { load(it) }
-    }
-}
-
-fun configValue(name: String, fallback: String = ""): String =
-    localProperties.getProperty(name)?.takeIf { it.isNotBlank() }
-        ?: System.getenv(name)?.takeIf { it.isNotBlank() }
-        ?: providers.gradleProperty(name).orNull?.takeIf { it.isNotBlank() }
-        ?: fallback
-
-fun String.asBuildConfigString(): String =
-    "\"" + replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\""
-
-val loginApiUrl = configValue("LOGIN_API_URL")
-val defaultChatApiUrl = if (loginApiUrl.endsWith("/login")) {
-    loginApiUrl.removeSuffix("/login") + "/chat"
-} else {
-    ""
-}
-val chatApiUrl = configValue("CHAT_API_URL", defaultChatApiUrl)
 
 android {
     namespace = "com.example.oeil"
@@ -44,8 +18,6 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        buildConfigField("String", "LOGIN_API_URL", loginApiUrl.asBuildConfigString())
-        buildConfigField("String", "CHAT_API_URL", chatApiUrl.asBuildConfigString())
     }
 
     buildTypes {

@@ -29,7 +29,7 @@ import kotlinx.coroutines.withContext
  * Kept as a plain class so the screen only deals with layout, while message
  * history, typing flags and reply timing live in one testable place.
  *
- * Replies come from a [ConversationReplySource] (Gemini in the app, canned text
+ * Replies come from a [ConversationReplySource] (the Python relay in the app, canned text
  * in tests). When a [store] and [userId] are supplied, threads and messages are
  * mirrored into SQLite on a single background lane so writes stay ordered.
  */
@@ -235,7 +235,7 @@ class OeilChatState(
     private fun failureMessage(error: Throwable): String {
         val detail = error.message?.trim().orEmpty()
         return if (detail.isBlank()) {
-            "I couldn't get a reply from Gemini. Please try again."
+            "I couldn't get a reply from the AI service. Please try again."
         } else {
             "I couldn't get a reply: $detail"
         }

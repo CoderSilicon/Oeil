@@ -9,31 +9,26 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.Locale
 
-/**
- * Calls the Oeil backend's `/chat` endpoint. The backend owns the Gemini key,
- * so the APK never contains it and the key can be rotated without a release.
- */
-class BackendReplySource(
-    private val chatUrl: String,
-    private val token: String?
-) : ConversationReplySource {
+/** Calls the Oeil relay; provider credentials never leave the server. */
+class BackendReplySource(backendUrl: String) : ConversationReplySource {
+
+    private val chatUrl = "${backendUrl.trimEnd('/')}/chat"
 
     override suspend fun reply(messages: List<ChatMessage>, mode: ReplyMode): String =
         withContext(Dispatchers.IO) {
-            if (chatUrl.isBlank()) {
+            if (chatUrl == "/chat") {
                 throw IllegalStateException(
-                    "Chat API URL is not configured. Set CHAT_API_URL in local.properties."
+                    "Backend URL is not configured. Open the menu and choose Settings."
                 )
             }
-            val bearer = token?.takeIf { it.isNotBlank() }
-                ?: throw IllegalStateException("Your session has expired. Sign in again.")
-            request(buildBody(messages, mode), bearer)
+            request(buildBody(messages, mode))
         }
 
     private fun buildBody(messages: List<ChatMessage>, mode: ReplyMode): String {
         val payload = JSONArray()
-        messages.forEach { message ->
+        messages.takeLast(MAX_MESSAGES).forEach { message ->
             val text = buildString {
                 message.attachmentLabel?.let {
                     append("[Attached image: ").append(it).append("]\n")
@@ -50,12 +45,12 @@ class BackendReplySource(
         }
 
         return JSONObject()
-            .put("mode", mode.name)
+            .put("mode", mode.name.uppercase(Locale.ROOT))
             .put("messages", payload)
             .toString()
     }
 
-    private fun request(body: String, token: String): String {
+    private fun request(body: String): String {
         val connection = URL(chatUrl).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = "POST"
@@ -64,7 +59,6 @@ class BackendReplySource(
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
             connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("Authorization", "Bearer $token")
 
             connection.outputStream.use { stream ->
                 stream.write(body.toByteArray(Charsets.UTF_8))
@@ -99,9 +93,13 @@ class BackendReplySource(
             when (val error = json.opt("error")) {
                 is JSONObject -> error.optString("message")
                 is String -> error
-                else -> json.optString("message")
+                else -> json.optString("detail").ifBlank { json.optString("message") }
             }
         }.getOrNull()
-        return message?.takeIf { it.isNotBlank() } ?: "Chat request failed (HTTP $code)."
+        return message?.takeIf { it.isNotBlank() } ?: "AI request failed (HTTP $code)."
+    }
+
+    private companion object {
+        const val MAX_MESSAGES = 50
     }
 }

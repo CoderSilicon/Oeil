@@ -1,9 +1,7 @@
 package com.example.oeil.model
 
-/** Signed-in account. [token] is whatever the login API returned, if anything. */
+/** Local profile used to scope conversation history on this device. */
 data class User(
     val id: String,
-    val email: String,
-    val name: String,
-    val token: String? = null
+    val name: String
 )

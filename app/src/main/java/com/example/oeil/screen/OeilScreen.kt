@@ -82,7 +82,7 @@ fun OeilScreen(
     user: User,
     replySource: ConversationReplySource,
     store: OeilDatabase,
-    onLogout: () -> Unit,
+    onOpenSettings: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val chat = remember(user.id, replySource, store) {
@@ -143,13 +143,10 @@ fun OeilScreen(
                     activeThreadId = chat.activeThreadId,
                     onNewChat = chat::startNewChat,
                     onOpenThread = chat::openThread,
+                    onOpenSettings = onOpenSettings,
                     onClearAll = {
                         chat.clearAll()
                         notice("History cleared")
-                    },
-                    onLogout = {
-                        scope.launch { drawerState.close() }
-                        onLogout()
                     },
                     onClose = { scope.launch { drawerState.close() } }
                 )

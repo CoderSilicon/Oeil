@@ -22,13 +22,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.example.oeil.data.AuthRepository
 import com.example.oeil.data.BackendReplySource
-import com.example.oeil.data.MockConversationReplySource
 import com.example.oeil.data.local.OeilDatabase
 import com.example.oeil.model.User
-import com.example.oeil.screen.LoginScreen
 import com.example.oeil.screen.OeilScreen
+import com.example.oeil.screen.SettingsScreen
 import com.example.oeil.ui.theme.BackgroundDark
 import com.example.oeil.ui.theme.GreenPrimary
 import com.example.oeil.ui.theme.TextPrimary
@@ -36,56 +34,51 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/**
- * Composition root: owns the SQLite store and decides between the sign-in gate
- * and the chat screen. A saved session skips login on the next launch.
- */
+/** Composition root for the local profile, backend settings and chat screen. */
 @Composable
 fun OeilApp(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val database = remember { OeilDatabase(context) }
-    val auth = remember { AuthRepository(database) }
     val scope = rememberCoroutineScope()
 
     var booting by remember { mutableStateOf(true) }
     var user by remember { mutableStateOf<User?>(null) }
+    var backendUrl by remember { mutableStateOf("") }
+    var showSettings by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        user = withContext(Dispatchers.IO) { auth.currentUser() }
+        val savedState = withContext(Dispatchers.IO) {
+            database.localUser() to database.getSetting(BACKEND_URL_SETTING).orEmpty()
+        }
+        user = savedState.first
+        backendUrl = savedState.second
         booting = false
     }
 
     when {
         booting -> BootScreen(modifier = modifier)
-
-        user == null -> LoginScreen(
-            authRepository = auth,
-            onLoggedIn = { loggedIn -> user = loggedIn },
+        showSettings -> SettingsScreen(
+            initialBackendUrl = backendUrl,
+            onBack = { showSettings = false },
+            onSave = { updatedUrl ->
+                scope.launch {
+                    withContext(Dispatchers.IO) {
+                        database.setSetting(BACKEND_URL_SETTING, updatedUrl)
+                    }
+                    backendUrl = updatedUrl
+                    showSettings = false
+                }
+            },
             modifier = modifier
         )
-
         else -> {
-            val activeUser = user!!
-            val replySource = remember(activeUser.id, activeUser.token) {
-                if (BuildConfig.CHAT_API_URL.isNotBlank()) {
-                    BackendReplySource(
-                        chatUrl = BuildConfig.CHAT_API_URL,
-                        token = activeUser.token
-                    )
-                } else {
-                    MockConversationReplySource()
-                }
-            }
+            val activeUser = requireNotNull(user)
+            val replySource = remember(backendUrl) { BackendReplySource(backendUrl) }
             OeilScreen(
                 user = activeUser,
                 replySource = replySource,
                 store = database,
-                onLogout = {
-                    scope.launch {
-                        withContext(Dispatchers.IO) { auth.logout() }
-                        user = null
-                    }
-                },
+                onOpenSettings = { showSettings = true },
                 modifier = modifier
             )
         }
@@ -116,3 +109,5 @@ private fun BootScreen(modifier: Modifier = Modifier) {
         }
     }
 }
+
+private const val BACKEND_URL_SETTING = "backend_url"
