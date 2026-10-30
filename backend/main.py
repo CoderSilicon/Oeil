@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from auth import router as auth_router
-
+from openai import AsyncOpenAI
 # The project keeps provider credentials in backend/.env. Load it automatically
 # so `uvicorn main:app` works without an extra --env-file flag.
 try:
@@ -173,8 +173,28 @@ AGENT_FUNCTIONS = [
 def env_value(name: str, default: str = "") -> str:
     """Return a trimmed environment value, treating blank as unset."""
     return (os.getenv(name) or "").strip() or default
+# NVIDIA configuration
+NVIDIA_API_KEY = env_value("NVIDIA_API_KEY")
 
+NVIDIA_MODEL = env_value(
+    "NVIDIA_MODEL",
+    "nvidia/nemotron-3.5-lightning-30b-a3b"
+)
 
+# NVIDIA configuration
+NVIDIA_API_KEY = env_value("NVIDIA_API_KEY")
+
+NVIDIA_MODEL = env_value(
+    "NVIDIA_MODEL",
+    "nvidia/nemotron-3.5-lightning-30b-a3b"
+)
+
+nvidia_client = AsyncOpenAI(
+    base_url="https://integrate.api.nvidia.com/v1",
+    api_key=NVIDIA_API_KEY or "missing-api-key"
+)
+    
+    
 class ChatMessage(BaseModel):
     role: Role
     content: str = Field(min_length=1, max_length=16_000)
