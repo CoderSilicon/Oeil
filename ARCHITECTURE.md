@@ -29,12 +29,12 @@ the running app never silently falls back to mock replies.
 | `OeilApp` | Loads the local profile and persisted backend URL; opens chat or settings |
 | `OeilScreen` | Chat layout, drawer, message list and composer |
 | `SettingsScreen` | Appearance, account and backend settings |
-| `AuthScreen` | Email/password sign-up and sign-in; launches provider OAuth |
-| `AuthClient` | Calls account endpoints and validates OAuth callback sessions |
+| `AuthScreen` | Email/password sign-up and sign-in |
+| `AuthClient` | Calls account endpoints |
 | `OeilChatState` | Message/thread state, reply lifecycle and local persistence |
 | `BackendReplySource` | JSON HTTP client for the Python `/chat` endpoint |
 | `OeilDatabase` | SQLite local profile, threads, messages and settings |
-| `backend/auth.py` | Password hashing, revocable sessions and provider OAuth |
+| `backend/auth.py` | Password hashing and revocable sessions |
 | `backend/main.py` | Validates chat requests and calls Nebius Token Factory |
 
 `MockConversationReplySource` remains available for unit tests; it is not wired
@@ -50,11 +50,8 @@ credentials.
 
 Account endpoints are `POST /auth/signup`, `POST /auth/login`, `GET /auth/me`,
 and `POST /auth/logout`. Passwords are PBKDF2-hashed, and sessions are signed
-bearer tokens backed by revocable SQLite records. `GET /auth/oauth/{provider}/start`
-begins Google, Microsoft or GitHub authorization; the backend handles the
-provider callback and returns the session to the app through
-`oeil://auth/callback`. Configure `OEIL_AUTH_SECRET`, `OEIL_PUBLIC_BASE_URL`, and
-provider client credentials on the server. OAuth requires a public HTTPS backend.
+bearer tokens backed by revocable SQLite records. Authentication is email and
+password only. Configure `OEIL_AUTH_SECRET` on the server.
 
 Configuration is read from the backend process environment:
 

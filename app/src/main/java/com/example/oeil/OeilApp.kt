@@ -1,9 +1,6 @@
 package com.example.oeil
 
 import android.app.Activity
-import android.content.ActivityNotFoundException
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,8 +46,6 @@ import java.io.IOException
 /** Composition root for local state, account settings and the chat screen. */
 @Composable
 fun OeilApp(
-    authCallbackUri: String?,
-    onAuthCallbackHandled: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -96,45 +91,6 @@ fun OeilApp(
         booting = false
     }
 
-    LaunchedEffect(authCallbackUri, backendUrl, booting) {
-        if (authCallbackUri == null || booting) return@LaunchedEffect
-        showAuth = true
-        authError = null
-        if (backendUrl.isBlank()) {
-            authError = "Set the backend URL in Settings before signing in."
-            onAuthCallbackHandled()
-            return@LaunchedEffect
-        }
-        val callback = Uri.parse(authCallbackUri)
-        val token = callback.fragment
-            ?.let { Uri.parse("oeil://auth/callback?$it").getQueryParameter("token") }
-        val error = callback.getQueryParameter("error")
-        try {
-            if (token != null) {
-                val account = withContext(Dispatchers.IO) {
-                    AuthClient(backendUrl).currentUser(token)
-                }
-                withContext(Dispatchers.IO) {
-                    database.saveUser(account)
-                    database.setActiveUser(account.id)
-                    database.setSetting(AUTH_TOKEN_SETTING, token)
-                }
-                user = account
-                authToken = token
-                showAuth = false
-                showSettings = true
-            } else if (error != null) {
-                authError = error
-            } else {
-                authError = "Sign-in did not complete. Please try again."
-            }
-        } catch (requestError: IOException) {
-            authError = requestError.message ?: "Could not finish sign-in."
-        } finally {
-            onAuthCallbackHandled()
-        }
-    }
-
     OeilTheme(darkTheme = darkTheme) {
         when {
             booting -> BootScreen(modifier = modifier)
@@ -166,17 +122,6 @@ fun OeilApp(
                         } finally {
                             authBusy = false
                         }
-                    }
-                },
-                onOAuth = { provider ->
-                    authError = null
-                    try {
-                        val url = AuthClient(backendUrl).oauthStartUrl(provider)
-                        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                    } catch (error: ActivityNotFoundException) {
-                        authError = "No browser is available to continue sign-in."
-                    } catch (error: IllegalArgumentException) {
-                        authError = error.message ?: "Set a valid backend URL in Settings."
                     }
                 },
                 modifier = modifier,

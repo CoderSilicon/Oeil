@@ -7,11 +7,10 @@ import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
-import java.net.URLEncoder
 
 data class AuthSession(val user: User, val token: String)
 
-/** Calls the account endpoints; OAuth provider secrets remain on the backend. */
+/** Calls the email/password account endpoints. */
 class AuthClient(backendUrl: String) {
     private val baseUrl = backendUrl.trimEnd('/')
 
@@ -41,12 +40,6 @@ class AuthClient(backendUrl: String) {
 
     suspend fun signOut(token: String) = withContext(Dispatchers.IO) {
         request("/auth/logout", JSONObject(), token)
-    }
-
-    fun oauthStartUrl(provider: String): String {
-        require(provider in SUPPORTED_PROVIDERS) { "Unsupported sign-in provider." }
-        require(baseUrl.isNotBlank()) { "Set a valid backend URL in Settings before signing in." }
-        return "$baseUrl/auth/oauth/$provider/start?redirect_uri=$APP_REDIRECT_URI"
     }
 
     private fun request(
@@ -106,8 +99,4 @@ class AuthClient(backendUrl: String) {
         )
     }
 
-    private companion object {
-        val SUPPORTED_PROVIDERS = setOf("google", "microsoft", "github")
-        val APP_REDIRECT_URI = URLEncoder.encode("oeil://auth/callback", Charsets.UTF_8.name())
-    }
 }

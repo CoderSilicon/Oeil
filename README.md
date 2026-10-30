@@ -8,8 +8,7 @@ in [PLAN.md](PLAN.md); the current image picker only attaches a label to chat.
 ## What works today
 
 - Compose chat UI with conversation history stored locally in SQLite.
-- Account settings with email/password sign-up and sign-in, plus Google,
-  Microsoft and GitHub OAuth sign-in.
+- Account settings with email/password sign-up and sign-in.
 - Light, dark and system appearance options saved on the device.
 - Auto, Precise and Creative response modes.
 - A Python FastAPI relay that calls an OpenAI-compatible NVIDIA model through
@@ -38,19 +37,6 @@ The auth database is stored in `backend/oeil-auth.sqlite3` by default. Set
 must be a stable random secret of at least 32 characters; changing it invalidates
 existing sessions.
 
-To enable provider sign-in, serve the backend over HTTPS, set
-`OEIL_PUBLIC_BASE_URL` to its public origin, and configure each provider's client
-ID and secret on the backend only:
-
-| Provider | Environment variables | Provider callback URL |
-|---|---|---|
-| Google | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | `{OEIL_PUBLIC_BASE_URL}/auth/oauth/google/callback` |
-| Microsoft | `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET` | `{OEIL_PUBLIC_BASE_URL}/auth/oauth/microsoft/callback` |
-| GitHub | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` | `{OEIL_PUBLIC_BASE_URL}/auth/oauth/github/callback` |
-
-The Android app receives OAuth sessions through the `oeil://auth/callback`
-application link. Do not put provider secrets in the Android app or commit them.
-
 The backend defaults to:
 
 - API base URL: `https://api.tokenfactory.nebius.com/v1`
@@ -61,7 +47,7 @@ uses a different endpoint/model. `GET /health` checks the relay; `POST /chat`
 is the app endpoint.
 
 **Use HTTPS and configure `OEIL_AUTH_SECRET` before deploying publicly.** The
-email/password and OAuth account endpoints issue revocable bearer sessions.
+email/password account endpoints issue revocable bearer sessions.
 `/chat` remains available to local/guest profiles and does not currently require
 an account token; add rate limiting and enforce authentication before exposing a
 production service.
@@ -109,7 +95,7 @@ app/src/main/java/com/example/oeil/
 └── model/                     # Messages, threads, and local profile
 backend/
 ├── main.py                    # FastAPI relay to Nebius and auth router
-├── auth.py                    # Password, bearer session and OAuth endpoints
+├── auth.py                    # Password and bearer-session endpoints
 └── test_main.py               # Backend contract and auth tests
 ```
 

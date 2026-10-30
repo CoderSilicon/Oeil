@@ -95,43 +95,16 @@ class BackendTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 503)
 
+    def test_social_auth_routes_are_not_available(self):
+        response = TestClient(app).get("/auth/oauth/google/start")
+        self.assertEqual(response.status_code, 404)
+
     def test_password_hashes_are_salted_and_verified(self):
         first = _hash_password("safe-password")
         second = _hash_password("safe-password")
         self.assertNotEqual(first, second)
         self.assertTrue(_verify_password("safe-password", first))
         self.assertFalse(_verify_password("wrong-password", first))
-
-    def test_oauth_start_requires_provider_configuration(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ,
-            {"OEIL_AUTH_DB_PATH": f"{directory}/auth.sqlite3"},
-            clear=True,
-        ):
-            response = TestClient(app).get("/auth/oauth/google/start")
-        self.assertEqual(response.status_code, 503)
-
-    def test_oauth_start_uses_a_fixed_app_redirect(self):
-        with tempfile.TemporaryDirectory() as directory, patch.dict(
-            os.environ,
-            {
-                "OEIL_AUTH_DB_PATH": f"{directory}/auth.sqlite3",
-                "OEIL_PUBLIC_BASE_URL": "https://api.example.test",
-                "GOOGLE_CLIENT_ID": "test-client",
-                "GOOGLE_CLIENT_SECRET": "test-secret",
-            },
-        ):
-            client = TestClient(app)
-            invalid = client.get(
-                "/auth/oauth/google/start",
-                params={"redirect_uri": "https://attacker.example"},
-            )
-            response = client.get("/auth/oauth/google/start", follow_redirects=False)
-        self.assertEqual(invalid.status_code, 400)
-        self.assertEqual(response.status_code, 302)
-        self.assertIn("accounts.google.com", response.headers["location"])
-        self.assertIn("https%3A%2F%2Fapi.example.test%2Fauth%2Foauth%2Fgoogle%2Fcallback", response.headers["location"])
-
 
 if __name__ == "__main__":
     unittest.main()

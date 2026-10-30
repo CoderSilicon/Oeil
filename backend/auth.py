@@ -9,47 +9,16 @@ import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
-from urllib.parse import urlencode, urlparse
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator
-from starlette.responses import RedirectResponse
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 bearer = HTTPBearer(auto_error=False)
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 PASSWORD_ROUNDS = 310_000
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-APP_REDIRECT_URI = "oeil://auth/callback"
-
-PROVIDERS = {
-    "google": {
-        "client_id": "GOOGLE_CLIENT_ID",
-        "client_secret": "GOOGLE_CLIENT_SECRET",
-        "authorize": "https://accounts.google.com/o/oauth2/v2/auth",
-        "token": "https://oauth2.googleapis.com/token",
-        "profile": "https://openidconnect.googleapis.com/v1/userinfo",
-        "scope": "openid email profile",
-    },
-    "microsoft": {
-        "client_id": "MICROSOFT_CLIENT_ID",
-        "client_secret": "MICROSOFT_CLIENT_SECRET",
-        "authorize": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-        "token": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-        "profile": "https://graph.microsoft.com/v1.0/me",
-        "scope": "openid email profile User.Read",
-    },
-    "github": {
-        "client_id": "GITHUB_CLIENT_ID",
-        "client_secret": "GITHUB_CLIENT_SECRET",
-        "authorize": "https://github.com/login/oauth/authorize",
-        "token": "https://github.com/login/oauth/access_token",
-        "profile": "https://api.github.com/user",
-        "scope": "read:user user:email",
-    },
-}
 
 
 class Credentials(BaseModel):
@@ -103,23 +72,11 @@ def _initialize() -> None:
                 password_hash TEXT,
                 created_at INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS oauth_accounts (
-                provider TEXT NOT NULL,
-                provider_user_id TEXT NOT NULL,
-                user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
-                PRIMARY KEY (provider, provider_user_id)
-            );
             CREATE TABLE IF NOT EXISTS auth_sessions (
                 id TEXT PRIMARY KEY NOT NULL,
                 user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
                 expires_at INTEGER NOT NULL,
                 revoked INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS oauth_states (
-                state TEXT PRIMARY KEY NOT NULL,
-                provider TEXT NOT NULL,
-                redirect_uri TEXT NOT NULL,
-                expires_at INTEGER NOT NULL
             );
             """
         )
@@ -217,44 +174,6 @@ def _auth_response(user: sqlite3.Row) -> dict:
     return {"token": _issue_session(user["id"]), "user": _user_payload(user)}
 
 
-def _get_or_create_oauth_user(
-    provider: str, provider_user_id: str, email: str, name: str
-) -> sqlite3.Row:
-    normalized_email = email.strip().casefold()
-    if not EMAIL_PATTERN.fullmatch(normalized_email):
-        raise HTTPException(status_code=400, detail="Provider did not return a valid email.")
-    display_name = name.strip()[:80] or normalized_email.split("@", 1)[0]
-    with _connect() as connection:
-        account = connection.execute(
-            """
-            SELECT auth_users.* FROM oauth_accounts
-            JOIN auth_users ON auth_users.id = oauth_accounts.user_id
-            WHERE provider = ? AND provider_user_id = ?
-            """,
-            (provider, provider_user_id),
-        ).fetchone()
-        if account:
-            return account
-        user = connection.execute(
-            "SELECT * FROM auth_users WHERE email = ?", (normalized_email,)
-        ).fetchone()
-        if user is None:
-            user_id = str(uuid.uuid4())
-            connection.execute(
-                "INSERT INTO auth_users (id, email, name, created_at) VALUES (?, ?, ?, ?)",
-                (user_id, normalized_email, display_name, int(time.time())),
-            )
-        else:
-            user_id = user["id"]
-        connection.execute(
-            "INSERT INTO oauth_accounts (provider, provider_user_id, user_id) VALUES (?, ?, ?)",
-            (provider, provider_user_id, user_id),
-        )
-        return connection.execute(
-            "SELECT * FROM auth_users WHERE id = ?", (user_id,)
-        ).fetchone()
-
-
 async def current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
 ) -> sqlite3.Row:
@@ -343,157 +262,3 @@ def logout(
             (payload["jti"], user["id"]),
         )
     return {"status": "ok"}
-
-
-def _provider_config(provider: str) -> dict:
-    config = PROVIDERS.get(provider)
-    if config is None:
-        raise HTTPException(status_code=404, detail="Unsupported sign-in provider.")
-    client_id = os.getenv(config["client_id"], "").strip()
-    client_secret = os.getenv(config["client_secret"], "").strip()
-    public_base = os.getenv("OEIL_PUBLIC_BASE_URL", "").strip().rstrip("/")
-    if not client_id or not client_secret or not public_base:
-        raise HTTPException(
-            status_code=503,
-            detail=f"{provider.title()} sign-in is not configured on this backend.",
-        )
-    parsed_base = urlparse(public_base)
-    if parsed_base.scheme != "https" or not parsed_base.netloc:
-        raise HTTPException(
-            status_code=503,
-            detail="OEIL_PUBLIC_BASE_URL must be the public HTTPS backend URL.",
-        )
-    return {**config, "id": client_id, "secret": client_secret, "base": public_base}
-
-
-@router.get("/oauth/{provider}/start")
-def oauth_start(provider: str, redirect_uri: str = APP_REDIRECT_URI) -> RedirectResponse:
-    if redirect_uri != APP_REDIRECT_URI:
-        raise HTTPException(status_code=400, detail="Invalid application redirect URI.")
-    config = _provider_config(provider)
-    state = secrets.token_urlsafe(32)
-    expires_at = int(time.time()) + 600
-    _initialize()
-    with _connect() as connection:
-        connection.execute(
-            "DELETE FROM oauth_states WHERE expires_at <= ?", (int(time.time()),)
-        )
-        connection.execute(
-            "INSERT INTO oauth_states (state, provider, redirect_uri, expires_at) VALUES (?, ?, ?, ?)",
-            (state, provider, redirect_uri, expires_at),
-        )
-    callback = f"{config['base']}/auth/oauth/{provider}/callback"
-    query = {
-        "client_id": config["id"],
-        "redirect_uri": callback,
-        "response_type": "code",
-        "scope": config["scope"],
-        "state": state,
-    }
-    if provider == "google":
-        query["access_type"] = "online"
-    if provider == "github":
-        query["allow_signup"] = "true"
-    return RedirectResponse(
-        f"{config['authorize']}?{urlencode(query)}", status_code=302
-    )
-
-
-async def _provider_profile(
-    provider: str, config: dict, code: str, callback: str
-) -> tuple[str, str, str]:
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        token_response = await client.post(
-            config["token"],
-            data={
-                "client_id": config["id"],
-                "client_secret": config["secret"],
-                "code": code,
-                "redirect_uri": callback,
-                "grant_type": "authorization_code",
-            },
-            headers={"Accept": "application/json"},
-        )
-        if not token_response.is_success:
-            raise HTTPException(status_code=502, detail="Could not exchange provider authorization.")
-        access_token = token_response.json().get("access_token")
-        if not isinstance(access_token, str) or not access_token:
-            raise HTTPException(status_code=502, detail="Provider did not return an access token.")
-        headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-        if provider == "github":
-            headers["User-Agent"] = "Oeil"
-        profile_response = await client.get(config["profile"], headers=headers)
-        if not profile_response.is_success:
-            raise HTTPException(status_code=502, detail="Could not load provider account.")
-        profile = profile_response.json()
-        email = profile.get("email") or profile.get("mail") or profile.get("userPrincipalName")
-        if provider == "github":
-            email = None
-            emails_response = await client.get(
-                "https://api.github.com/user/emails", headers=headers
-            )
-            if not emails_response.is_success:
-                raise HTTPException(status_code=502, detail="Could not verify the GitHub account email.")
-            emails = emails_response.json()
-            email = next(
-                (
-                    item["email"]
-                    for item in emails
-                    if item.get("verified") and item.get("primary")
-                ),
-                None,
-            )
-        if provider == "google" and profile.get("email_verified") is not True:
-            raise HTTPException(status_code=403, detail="Verify your Google email before signing in.")
-        if provider == "github" and not email:
-            raise HTTPException(status_code=403, detail="A verified GitHub email is required.")
-        provider_user_id = str(profile.get("sub") or profile.get("id") or "")
-        name = profile.get("name") or profile.get("displayName") or profile.get("login") or email
-        if not provider_user_id or not isinstance(email, str):
-            raise HTTPException(status_code=502, detail="Provider returned an incomplete account profile.")
-        return provider_user_id, email, str(name)
-
-
-@router.get("/oauth/{provider}/callback")
-async def oauth_callback(
-    provider: str,
-    code: str | None = None,
-    state: str | None = None,
-    error: str | None = None,
-) -> RedirectResponse:
-    if provider not in PROVIDERS:
-        raise HTTPException(status_code=404, detail="Unsupported sign-in provider.")
-    app_redirect = APP_REDIRECT_URI
-    if error or not code or not state:
-        return RedirectResponse(
-            f"{app_redirect}?{urlencode({'error': 'Sign-in was cancelled or not authorized.'})}",
-            status_code=302,
-        )
-    _session_secret()
-    _initialize()
-    with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        saved_state = connection.execute(
-            "SELECT * FROM oauth_states WHERE state = ? AND provider = ?",
-            (state, provider),
-        ).fetchone()
-        if saved_state:
-            connection.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
-    if (
-        saved_state is None
-        or saved_state["expires_at"] <= int(time.time())
-        or saved_state["redirect_uri"] != app_redirect
-    ):
-        return RedirectResponse(
-            f"{app_redirect}?{urlencode({'error': 'Sign-in expired. Please try again.'})}",
-            status_code=302,
-        )
-    config = _provider_config(provider)
-    callback = f"{config['base']}/auth/oauth/{provider}/callback"
-    try:
-        provider_id, email, name = await _provider_profile(provider, config, code, callback)
-        user = _get_or_create_oauth_user(provider, provider_id, email, name)
-        token = _issue_session(user["id"])
-    except httpx.RequestError as request_error:
-        raise HTTPException(status_code=502, detail="Could not connect to the sign-in provider.") from request_error
-    return RedirectResponse(f"{app_redirect}#token={token}", status_code=302)

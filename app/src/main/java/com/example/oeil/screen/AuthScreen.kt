@@ -17,7 +17,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -42,7 +41,6 @@ fun AuthScreen(
     externalError: String?,
     onBack: () -> Unit,
     onSubmit: (name: String, email: String, password: String, signUp: Boolean) -> Unit,
-    onOAuth: (provider: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var signUp by remember { mutableStateOf(false) }
@@ -155,25 +153,5 @@ fun AuthScreen(
                 Text(if (signUp) "Sign in" else "Create account")
             }
         }
-
-        Spacer(modifier = Modifier.height(20.dp))
-        Text(
-            text = "OR CONTINUE WITH",
-            modifier = Modifier.padding(bottom = 12.dp),
-            color = TextSecondary,
-            style = MaterialTheme.typography.labelMedium,
-        )
-        listOf("Google" to "google", "Microsoft" to "microsoft", "GitHub" to "github")
-            .forEach { (label, provider) ->
-                OutlinedButton(
-                    onClick = { onOAuth(provider) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 10.dp),
-                    enabled = !busy,
-                ) {
-                    Text("Continue with $label")
-                }
-            }
     }
 }
