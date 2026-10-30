@@ -4,8 +4,10 @@ from typing import Literal
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from auth import router as auth_router
 
 app = FastAPI(title="Oeil API", version="1.0.0")
+app.include_router(auth_router)
 
 Mode = Literal["AUTO", "PRECISE", "CREATIVE"]
 Role = Literal["user", "assistant"]

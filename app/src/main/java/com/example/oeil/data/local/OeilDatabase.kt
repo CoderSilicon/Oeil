@@ -93,7 +93,7 @@ class OeilDatabase(context: Context) : SQLiteOpenHelper(
     fun activeUser(): User? =
         readableDatabase.rawQuery(
             """
-            SELECT u.id, u.name
+            SELECT u.id, u.name, u.email
             FROM users u
             INNER JOIN session s ON s.user_id = u.id
             WHERE s.id = 1
@@ -102,9 +102,9 @@ class OeilDatabase(context: Context) : SQLiteOpenHelper(
         ).use { cursor -> if (cursor.moveToFirst()) cursor.toUser() else null }
 
     fun localUser(): User {
-        writableDatabase.execSQL("UPDATE users SET token = NULL")
         val existing = activeUser()
-        val id = existing?.id ?: getSetting(LOCAL_USER_ID_KEY)
+        if (existing != null) return existing
+        val id = getSetting(LOCAL_USER_ID_KEY)
             ?: UUID.randomUUID().toString().also { setSetting(LOCAL_USER_ID_KEY, it) }
         val user = User(id = id, name = "On this device")
         saveUser(user)
@@ -115,7 +115,7 @@ class OeilDatabase(context: Context) : SQLiteOpenHelper(
     fun saveUser(user: User) {
         val values = ContentValues().apply {
             put("id", user.id)
-            put("email", LOCAL_USER_EMAIL)
+            put("email", user.email ?: LOCAL_USER_EMAIL)
             put("name", user.name)
             putNull("token")
             put("created_at", System.currentTimeMillis())
@@ -275,7 +275,9 @@ class OeilDatabase(context: Context) : SQLiteOpenHelper(
     private fun Cursor.toUser(): User {
         return User(
             id = getString(getColumnIndexOrThrow("id")),
-            name = getString(getColumnIndexOrThrow("name"))
+            name = getString(getColumnIndexOrThrow("name")),
+            email = getString(getColumnIndexOrThrow("email"))
+                .takeUnless { it == LOCAL_USER_EMAIL }
         )
     }
 
