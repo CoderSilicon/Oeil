@@ -192,22 +192,72 @@ def _issue_session(user_id: str) -> str:
 
 def _decode_session(token: str) -> dict:
     secret = _session_secret()
+
     try:
+        if not isinstance(token, str) or len(token) > 8192:
+            raise ValueError("Invalid token")
+
         header, payload, signature = token.split(".")
+
+        if not header or not payload or not signature:
+            raise ValueError("Missing token component")
+
+        def decode_part(part: str) -> bytes:
+            if not re.fullmatch(r"[A-Za-z0-9_-]+", part):
+                raise ValueError("Invalid token encoding")
+
+            return base64.b64decode(
+                part + "=" * (-len(part) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+
         unsigned = f"{header}.{payload}"
-        expected = hmac.new(secret, unsigned.encode("ascii"), hashlib.sha256).digest()
-        supplied = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+        expected = hmac.new(
+            secret, unsigned.encode("ascii"), hashlib.sha256
+        ).digest()
+
+        supplied = decode_part(signature)
+
         if not hmac.compare_digest(expected, supplied):
             raise ValueError("Invalid signature")
-        decoded = json.loads(
-            base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
-        )
-        if decoded.get("exp", 0) <= int(time.time()):
-            raise ValueError("Expired session")
-        return decoded
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=401, detail="Invalid or expired session.") from error
 
+        decoded_header = json.loads(decode_part(header))
+        decoded = json.loads(decode_part(payload))
+
+        if not isinstance(decoded_header, dict):
+            raise ValueError("Invalid token header")
+
+        if decoded_header.get("alg") != "HS256":
+            raise ValueError("Invalid token algorithm")
+
+        if decoded_header.get("typ") != "JWT":
+            raise ValueError("Invalid token type")
+
+        if not isinstance(decoded, dict):
+            raise ValueError("Invalid token payload")
+
+        if not isinstance(decoded.get("sub"), str) or not decoded["sub"]:
+            raise ValueError("Invalid subject")
+
+        if not isinstance(decoded.get("jti"), str) or not decoded["jti"]:
+            raise ValueError("Invalid session ID")
+
+        expiry = decoded.get("exp")
+
+        if isinstance(expiry, bool) or not isinstance(expiry, int):
+            raise ValueError("Invalid expiry")
+
+        if expiry <= int(time.time()):
+            raise ValueError("Expired session")
+
+        return decoded
+
+    except (ValueError, TypeError, KeyError, UnicodeError) as error:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired session."
+        ) from error
 
 def _user_payload(user: sqlite3.Row) -> dict[str, str]:
     return {"id": user["id"], "name": user["name"], "email": user["email"]}
