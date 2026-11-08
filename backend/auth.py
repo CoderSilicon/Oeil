@@ -1,26 +1,40 @@
-import base64
-import hashlib
-import hmac
-import json
-import os
 import re
 import secrets
 import sqlite3
 import time
 import uuid
-from contextlib import contextmanager
 from urllib.parse import urlencode, urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field, field_validator
 from starlette.responses import RedirectResponse
 
+from app import config as app_config
+from app import rate_limit, security
+
+# Re-exported for backward compatibility.
+from app.db import (
+    connect as _connect,
+    database_path as _database_path,
+    initialize as _initialize,
+)
+from app.db import oauth, sessions, users
+
+# Re-exported for backward compatibility.
+from app.deps import bearer, current_user
+from app.services import auth_service
+from app.security import (
+    PASSWORD_ROUNDS,
+    SESSION_TTL_SECONDS,
+    decode_session as _decode_session,
+    hash_password as _hash_password,
+    session_secret as _session_secret,
+    verify_password as _verify_password,
+)
+
 router = APIRouter(prefix="/auth", tags=["authentication"])
-bearer = HTTPBearer(auto_error=False)
-SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
-PASSWORD_ROUNDS = 310_000
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 APP_REDIRECT_URI = "oeil://auth/callback"
 
@@ -76,137 +90,8 @@ class Credentials(BaseModel):
         return normalized
 
 
-def _database_path() -> str:
-    return os.getenv("OEIL_AUTH_DB_PATH", "oeil-auth.sqlite3")
-
-
-@contextmanager
-def _connect():
-    connection = sqlite3.connect(_database_path(), timeout=10)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    try:
-        with connection:
-            yield connection
-    finally:
-        connection.close()
-
-
-def _initialize() -> None:
-    with _connect() as connection:
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS auth_users (
-                id TEXT PRIMARY KEY NOT NULL,
-                email TEXT NOT NULL UNIQUE,
-                name TEXT NOT NULL,
-                password_hash TEXT,
-                created_at INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS oauth_accounts (
-                provider TEXT NOT NULL,
-                provider_user_id TEXT NOT NULL,
-                user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
-                PRIMARY KEY (provider, provider_user_id)
-            );
-            CREATE TABLE IF NOT EXISTS auth_sessions (
-                id TEXT PRIMARY KEY NOT NULL,
-                user_id TEXT NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
-                expires_at INTEGER NOT NULL,
-                revoked INTEGER NOT NULL DEFAULT 0
-            );
-            CREATE TABLE IF NOT EXISTS oauth_states (
-                state TEXT PRIMARY KEY NOT NULL,
-                provider TEXT NOT NULL,
-                redirect_uri TEXT NOT NULL,
-                expires_at INTEGER NOT NULL
-            );
-            """
-        )
-
-
-def _session_secret() -> bytes:
-    secret = os.getenv("OEIL_AUTH_SECRET", "").strip()
-    if len(secret) < 32:
-        raise HTTPException(
-            status_code=503,
-            detail="Authentication is not configured. Set OEIL_AUTH_SECRET to a random value of at least 32 characters.",
-        )
-    return secret.encode("utf-8")
-
-
-def _hash_password(password: str) -> str:
-    salt = secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), salt, PASSWORD_ROUNDS
-    )
-    return "pbkdf2_sha256${}${}${}".format(
-        PASSWORD_ROUNDS,
-        base64.urlsafe_b64encode(salt).decode("ascii"),
-        base64.urlsafe_b64encode(digest).decode("ascii"),
-    )
-
-
-def _verify_password(password: str, stored_hash: str | None) -> bool:
-    if not stored_hash:
-        return False
-    try:
-        algorithm, rounds, salt, expected = stored_hash.split("$", 3)
-        if algorithm != "pbkdf2_sha256":
-            return False
-        actual = hashlib.pbkdf2_hmac(
-            "sha256",
-            password.encode("utf-8"),
-            base64.urlsafe_b64decode(salt),
-            int(rounds),
-        )
-        return hmac.compare_digest(
-            actual, base64.urlsafe_b64decode(expected)
-        )
-    except (ValueError, TypeError):
-        return False
-
-
-def _encode_part(value: dict) -> str:
-    return base64.urlsafe_b64encode(
-        json.dumps(value, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    ).rstrip(b"=").decode("ascii")
-
-
 def _issue_session(user_id: str) -> str:
-    _initialize()
-    secret = _session_secret()
-    now = int(time.time())
-    session_id = secrets.token_urlsafe(24)
-    payload = {"sub": user_id, "jti": session_id, "exp": now + SESSION_TTL_SECONDS}
-    unsigned = f"{_encode_part({'alg': 'HS256', 'typ': 'JWT'})}.{_encode_part(payload)}"
-    signature = hmac.new(secret, unsigned.encode("ascii"), hashlib.sha256).digest()
-    token = f"{unsigned}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode('ascii')}"
-    with _connect() as connection:
-        connection.execute(
-            "INSERT INTO auth_sessions (id, user_id, expires_at) VALUES (?, ?, ?)",
-            (session_id, user_id, now + SESSION_TTL_SECONDS),
-        )
-    return token
-
-
-def _decode_session(token: str) -> dict:
-    secret = _session_secret()
-    try:
-        header, payload, signature = token.split(".")
-        unsigned = f"{header}.{payload}"
-        expected = hmac.new(secret, unsigned.encode("ascii"), hashlib.sha256).digest()
-        supplied = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
-        if not hmac.compare_digest(expected, supplied):
-            raise ValueError("Invalid signature")
-        decoded = json.loads(
-            base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
-        )
-        if decoded.get("exp", 0) <= int(time.time()):
-            raise ValueError("Expired session")
-        return decoded
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as error:
-        raise HTTPException(status_code=401, detail="Invalid or expired session.") from error
+    return auth_service.issue_session(user_id)
 
 
 def _user_payload(user: sqlite3.Row) -> dict[str, str]:
@@ -218,110 +103,127 @@ def _auth_response(user: sqlite3.Row) -> dict:
 
 
 def _get_or_create_oauth_user(
-    provider: str, provider_user_id: str, email: str, name: str
+    provider: str,
+    provider_user_id: str,
+    email: str | None,
+    name: str,
+    email_verified: bool,
 ) -> sqlite3.Row:
-    normalized_email = email.strip().casefold()
-    if not EMAIL_PATTERN.fullmatch(normalized_email):
-        raise HTTPException(status_code=400, detail="Provider did not return a valid email.")
-    display_name = name.strip()[:80] or normalized_email.split("@", 1)[0]
-    with _connect() as connection:
-        account = connection.execute(
-            """
-            SELECT auth_users.* FROM oauth_accounts
-            JOIN auth_users ON auth_users.id = oauth_accounts.user_id
-            WHERE provider = ? AND provider_user_id = ?
-            """,
-            (provider, provider_user_id),
-        ).fetchone()
+    """Return the user for an OAuth identity without unsafe email linking.
+
+    Existing provider links keep working. A new link is created only when the
+    provider confirms the email address and no local account already owns that
+    email. Matching an existing local email is deliberately rejected: the local
+    account has no verified-email proof, so automatically linking would allow
+    account takeover.
+    """
+    try:
+        with _connect() as connection:
+            oauth.begin_immediate(connection)
+            account = oauth.find_account(connection, provider, provider_user_id)
+            if account:
+                return account
+            if not email_verified:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        "The provider did not confirm that this email address "
+                        "is verified. Sign-in was not completed."
+                    ),
+                )
+            if email is None:
+                raise HTTPException(
+                    status_code=403,
+                    detail="The provider did not return an email address.",
+                )
+            normalized_email = email.strip().casefold()
+            if not EMAIL_PATTERN.fullmatch(normalized_email):
+                raise HTTPException(
+                    status_code=400, detail="Provider did not return a valid email."
+                )
+            user = users.find_by_email(connection, normalized_email)
+            if user is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "An account with this email already exists. Automatic "
+                        "provider linking is disabled; sign in with your "
+                        "existing method."
+                    ),
+                )
+            display_name = name.strip()[:80] or normalized_email.split("@", 1)[0]
+            user_id = str(uuid.uuid4())
+            users.create(
+                connection,
+                user_id=user_id,
+                email=normalized_email,
+                name=display_name,
+                password_hash=None,
+                created_at=int(time.time()),
+            )
+            oauth.create_account(
+                connection,
+                provider=provider,
+                provider_user_id=provider_user_id,
+                user_id=user_id,
+            )
+            user = users.find_by_id(connection, user_id)
+            if user is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Could not create the account. Please try again.",
+                )
+            return user
+    except sqlite3.IntegrityError as error:
+        # A concurrent callback may have created the same identity after our
+        # lookup. Re-read it and return the winner instead of surfacing a 500.
+        try:
+            with _connect() as connection:
+                account = oauth.find_account(connection, provider, provider_user_id)
+        except sqlite3.Error:
+            account = None
         if account:
             return account
-        user = connection.execute(
-            "SELECT * FROM auth_users WHERE email = ?", (normalized_email,)
-        ).fetchone()
-        if user is None:
-            user_id = str(uuid.uuid4())
-            connection.execute(
-                "INSERT INTO auth_users (id, email, name, created_at) VALUES (?, ?, ?, ?)",
-                (user_id, normalized_email, display_name, int(time.time())),
-            )
-        else:
-            user_id = user["id"]
-        connection.execute(
-            "INSERT INTO oauth_accounts (provider, provider_user_id, user_id) VALUES (?, ?, ?)",
-            (provider, provider_user_id, user_id),
-        )
-        return connection.execute(
-            "SELECT * FROM auth_users WHERE id = ?", (user_id,)
-        ).fetchone()
-
-
-async def current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-) -> sqlite3.Row:
-    if credentials is None or credentials.scheme.lower() != "bearer":
-        raise HTTPException(status_code=401, detail="Sign in to continue.")
-    payload = _decode_session(credentials.credentials)
-    _initialize()
-    with _connect() as connection:
-        session = connection.execute(
-            "SELECT * FROM auth_sessions WHERE id = ? AND user_id = ?",
-            (payload.get("jti"), payload.get("sub")),
-        ).fetchone()
-        if (
-            session is None
-            or session["revoked"]
-            or session["expires_at"] <= int(time.time())
-        ):
-            raise HTTPException(status_code=401, detail="Session has expired.")
-        user = connection.execute(
-            "SELECT * FROM auth_users WHERE id = ?", (payload.get("sub"),)
-        ).fetchone()
-    if user is None:
-        raise HTTPException(status_code=401, detail="Account no longer exists.")
-    return user
+        raise HTTPException(
+            status_code=409,
+            detail="Could not link this provider account. Please try again.",
+        ) from error
+    except sqlite3.Error as error:
+        raise HTTPException(
+            status_code=503,
+            detail="The account database is busy. Please try again.",
+        ) from error
 
 
 @router.post("/signup")
-def signup(credentials: Credentials) -> dict:
-    _initialize()
-    _session_secret()
-    if credentials.name is None:
-        raise HTTPException(status_code=422, detail="Name is required to create an account.")
-    user_id = str(uuid.uuid4())
+def signup(credentials: Credentials, request: Request) -> dict:
+    rate_limit.limiter.check("signup", request, rate_limit.SIGNUP_LIMIT)
     try:
-        with _connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO auth_users (id, email, name, password_hash, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    user_id,
-                    credentials.email,
-                    credentials.name,
-                    _hash_password(credentials.password),
-                    int(time.time()),
-                ),
-            )
-            user = connection.execute(
-                "SELECT * FROM auth_users WHERE id = ?", (user_id,)
-            ).fetchone()
-    except sqlite3.IntegrityError as error:
+        user = auth_service.signup(
+            email=credentials.email,
+            password=credentials.password,
+            name=credentials.name,
+        )
+    except auth_service.NameRequiredError:
+        raise HTTPException(
+            status_code=422, detail="Name is required to create an account."
+        )
+    except auth_service.DuplicateEmailError as error:
         raise HTTPException(
             status_code=409, detail="An account with this email already exists."
-        ) from error
+        ) from error.__cause__
     return _auth_response(user)
 
 
 @router.post("/login")
-def login(credentials: Credentials) -> dict:
-    _initialize()
-    _session_secret()
-    with _connect() as connection:
-        user = connection.execute(
-            "SELECT * FROM auth_users WHERE email = ?", (credentials.email,)
-        ).fetchone()
-    if user is None or not _verify_password(credentials.password, user["password_hash"]):
+def login(credentials: Credentials, request: Request) -> dict:
+    rate_limit.limiter.check("login", request, rate_limit.LOGIN_LIMIT)
+    try:
+        user = auth_service.login(
+            email=credentials.email,
+            password=credentials.password,
+        )
+    except auth_service.InvalidCredentialsError:
         raise HTTPException(status_code=401, detail="Email or password is incorrect.")
     return _auth_response(user)
 
@@ -338,10 +240,7 @@ def logout(
 ) -> dict[str, str]:
     payload = _decode_session(credentials.credentials)
     with _connect() as connection:
-        connection.execute(
-            "UPDATE auth_sessions SET revoked = 1 WHERE id = ? AND user_id = ?",
-            (payload["jti"], user["id"]),
-        )
+        sessions.revoke(connection, payload["jti"], user["id"])
     return {"status": "ok"}
 
 
@@ -349,9 +248,9 @@ def _provider_config(provider: str) -> dict:
     config = PROVIDERS.get(provider)
     if config is None:
         raise HTTPException(status_code=404, detail="Unsupported sign-in provider.")
-    client_id = os.getenv(config["client_id"], "").strip()
-    client_secret = os.getenv(config["client_secret"], "").strip()
-    public_base = os.getenv("OEIL_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    client_id = app_config.env_value(config["client_id"])
+    client_secret = app_config.env_value(config["client_secret"])
+    public_base = app_config.public_base_url()
     if not client_id or not client_secret or not public_base:
         raise HTTPException(
             status_code=503,
@@ -367,7 +266,12 @@ def _provider_config(provider: str) -> dict:
 
 
 @router.get("/oauth/{provider}/start")
-def oauth_start(provider: str, redirect_uri: str = APP_REDIRECT_URI) -> RedirectResponse:
+def oauth_start(
+    provider: str,
+    request: Request,
+    redirect_uri: str = APP_REDIRECT_URI,
+) -> RedirectResponse:
+    rate_limit.limiter.check("oauth_start", request, rate_limit.OAUTH_START_LIMIT)
     if redirect_uri != APP_REDIRECT_URI:
         raise HTTPException(status_code=400, detail="Invalid application redirect URI.")
     config = _provider_config(provider)
@@ -375,12 +279,13 @@ def oauth_start(provider: str, redirect_uri: str = APP_REDIRECT_URI) -> Redirect
     expires_at = int(time.time()) + 600
     _initialize()
     with _connect() as connection:
-        connection.execute(
-            "DELETE FROM oauth_states WHERE expires_at <= ?", (int(time.time()),)
-        )
-        connection.execute(
-            "INSERT INTO oauth_states (state, provider, redirect_uri, expires_at) VALUES (?, ?, ?, ?)",
-            (state, provider, redirect_uri, expires_at),
+        oauth.delete_expired_states(connection, int(time.time()))
+        oauth.create_state(
+            connection,
+            state=state,
+            provider=provider,
+            redirect_uri=redirect_uri,
+            expires_at=expires_at,
         )
     callback = f"{config['base']}/auth/oauth/{provider}/callback"
     query = {
@@ -399,9 +304,24 @@ def oauth_start(provider: str, redirect_uri: str = APP_REDIRECT_URI) -> Redirect
     )
 
 
+def _provider_email_verified(provider: str, profile: dict) -> bool:
+    """Return True only when the provider supplied an authoritative claim."""
+    if provider == "google":
+        return profile.get("email_verified") is True
+    if provider == "microsoft":
+        # Microsoft Graph commonly exposes mail/userPrincipalName without an
+        # email-verification claim. Treat those fields as display data, not as
+        # proof of ownership.
+        return (
+            profile.get("email_verified") is True
+            or profile.get("verified_primary_email") is True
+        )
+    return False
+
+
 async def _provider_profile(
     provider: str, config: dict, code: str, callback: str
-) -> tuple[str, str, str]:
+) -> tuple[str, str | None, str, bool]:
     async with httpx.AsyncClient(timeout=15.0) as client:
         token_response = await client.post(
             config["token"],
@@ -416,7 +336,17 @@ async def _provider_profile(
         )
         if not token_response.is_success:
             raise HTTPException(status_code=502, detail="Could not exchange provider authorization.")
-        access_token = token_response.json().get("access_token")
+        try:
+            token_data = token_response.json()
+        except ValueError as error:
+            raise HTTPException(
+                status_code=502, detail="Provider returned an unreadable response."
+            ) from error
+        if not isinstance(token_data, dict):
+            raise HTTPException(
+                status_code=502, detail="Provider returned an unreadable response."
+            )
+        access_token = token_data.get("access_token")
         if not isinstance(access_token, str) or not access_token:
             raise HTTPException(status_code=502, detail="Provider did not return an access token.")
         headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
@@ -425,42 +355,66 @@ async def _provider_profile(
         profile_response = await client.get(config["profile"], headers=headers)
         if not profile_response.is_success:
             raise HTTPException(status_code=502, detail="Could not load provider account.")
-        profile = profile_response.json()
+        try:
+            profile = profile_response.json()
+        except ValueError as error:
+            raise HTTPException(
+                status_code=502, detail="Provider returned an unreadable response."
+            ) from error
+        if not isinstance(profile, dict):
+            raise HTTPException(
+                status_code=502, detail="Provider returned an unreadable response."
+            )
         email = profile.get("email") or profile.get("mail") or profile.get("userPrincipalName")
+        email_verified = _provider_email_verified(provider, profile)
         if provider == "github":
             email = None
+            email_verified = False
             emails_response = await client.get(
                 "https://api.github.com/user/emails", headers=headers
             )
             if not emails_response.is_success:
                 raise HTTPException(status_code=502, detail="Could not verify the GitHub account email.")
-            emails = emails_response.json()
+            try:
+                emails = emails_response.json()
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=502, detail="Provider returned an unreadable response."
+                ) from error
+            if not isinstance(emails, list):
+                raise HTTPException(
+                    status_code=502, detail="Provider returned an unreadable response."
+                )
             email = next(
                 (
-                    item["email"]
+                    item.get("email")
                     for item in emails
-                    if item.get("verified") and item.get("primary")
+                    if isinstance(item, dict)
+                    and item.get("verified") is True
+                    and item.get("primary") is True
+                    and isinstance(item.get("email"), str)
                 ),
                 None,
             )
-        if provider == "google" and profile.get("email_verified") is not True:
-            raise HTTPException(status_code=403, detail="Verify your Google email before signing in.")
-        if provider == "github" and not email:
-            raise HTTPException(status_code=403, detail="A verified GitHub email is required.")
+            email_verified = email is not None
         provider_user_id = str(profile.get("sub") or profile.get("id") or "")
         name = profile.get("name") or profile.get("displayName") or profile.get("login") or email
-        if not provider_user_id or not isinstance(email, str):
+        if not provider_user_id:
             raise HTTPException(status_code=502, detail="Provider returned an incomplete account profile.")
-        return provider_user_id, email, str(name)
+        if email is not None and not isinstance(email, str):
+            raise HTTPException(status_code=502, detail="Provider returned an incomplete account profile.")
+        return provider_user_id, email, str(name) if name else "", email_verified
 
 
 @router.get("/oauth/{provider}/callback")
 async def oauth_callback(
     provider: str,
+    request: Request,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
 ) -> RedirectResponse:
+    rate_limit.limiter.check("oauth_callback", request, rate_limit.OAUTH_CALLBACK_LIMIT)
     if provider not in PROVIDERS:
         raise HTTPException(status_code=404, detail="Unsupported sign-in provider.")
     app_redirect = APP_REDIRECT_URI
@@ -470,15 +424,18 @@ async def oauth_callback(
             status_code=302,
         )
     _session_secret()
-    _initialize()
-    with _connect() as connection:
-        connection.execute("BEGIN IMMEDIATE")
-        saved_state = connection.execute(
-            "SELECT * FROM oauth_states WHERE state = ? AND provider = ?",
-            (state, provider),
-        ).fetchone()
-        if saved_state:
-            connection.execute("DELETE FROM oauth_states WHERE state = ?", (state,))
+    try:
+        _initialize()
+        with _connect() as connection:
+            oauth.begin_immediate(connection)
+            saved_state = oauth.find_state(connection, state, provider)
+            if saved_state:
+                oauth.delete_state(connection, state)
+    except sqlite3.Error:
+        return RedirectResponse(
+            f"{app_redirect}?{urlencode({'error': 'Sign-in could not be completed. Please try again.'})}",
+            status_code=302,
+        )
     if (
         saved_state is None
         or saved_state["expires_at"] <= int(time.time())
@@ -491,9 +448,27 @@ async def oauth_callback(
     config = _provider_config(provider)
     callback = f"{config['base']}/auth/oauth/{provider}/callback"
     try:
-        provider_id, email, name = await _provider_profile(provider, config, code, callback)
-        user = _get_or_create_oauth_user(provider, provider_id, email, name)
+        provider_id, email, name, email_verified = await _provider_profile(
+            provider, config, code, callback
+        )
+        user = _get_or_create_oauth_user(
+            provider,
+            provider_id,
+            email,
+            name,
+            email_verified,
+        )
         token = _issue_session(user["id"])
+    except HTTPException as auth_error:
+        return RedirectResponse(
+            f"{app_redirect}?{urlencode({'error': str(auth_error.detail)})}",
+            status_code=302,
+        )
+    except sqlite3.Error:
+        return RedirectResponse(
+            f"{app_redirect}?{urlencode({'error': 'Sign-in could not be completed. Please try again.'})}",
+            status_code=302,
+        )
     except httpx.RequestError as request_error:
         raise HTTPException(status_code=502, detail="Could not connect to the sign-in provider.") from request_error
     return RedirectResponse(f"{app_redirect}#token={token}", status_code=302)
